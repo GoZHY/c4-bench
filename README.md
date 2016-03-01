@@ -35,3 +35,12 @@ You can monitor the test progress by running:
     docker -H tcp://localhost:2376 logs -tf bench
 
 I add timestamps with the `-t` flag so I can get an idea how quickly progress is being made or judge if the test has gotten stuck.
+
+## Important IP Addresses in the Clusters
+
+* The test instance is always at 10.0.0.40
+* The swarm managers are always at 10.0.0.20
+* Primary etcd instance is always at 10.0.0.10
+* Optional secondary etcd instance is always at 10.0.0.11
+* Nodes are always started in the 10.0.128.0/17 subnet (10.0.0.0/17 conflicts with some LXC config that conflicts with machines at 10.0.3.0/24)
+* Kube API servers are always to be accessed by the ELB DNS name
