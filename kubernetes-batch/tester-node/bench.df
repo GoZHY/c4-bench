@@ -8,4 +8,4 @@ RUN apt-get update && \
     apt-get remove -y curl
 COPY ./bench.sh /bench.sh
 COPY ./kubectl /bin/kubectl
-CMD /bench.sh
+CMD /bench.sh kube
