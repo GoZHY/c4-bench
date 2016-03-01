@@ -1,1 +1,1 @@
-# ccc-bench: Common Container Cluster Benchmarking
+# ccc-bench: Container Cluster Common Benchmark
