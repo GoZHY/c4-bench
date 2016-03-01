@@ -1,0 +1,742 @@
+{
+  "Description": "Docker Kube cluster on Etcd. No overlay. Autoscaled and LBed API servers. Single VPC, subnet, availability zone.",
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": {
+    "NamePrefix": {
+      "Description": "Prefix for resource Name tags.",
+      "Type": "String",
+      "Default": "KubeCluster-"
+    },
+    "AvailabilityZone": {
+      "Description": "The target availability zone.",
+      "Type": "String",
+      "MaxLength": "1",
+      "MinLength": "0",
+      "AllowedPattern": "^[a-z]+$",
+      "Default": "a"
+    },
+    "ClusterName": {
+      "Description": "Name of the Kube cluster. The value of the KubeCluster tag.",
+      "Type": "String",
+      "Default": "default"
+    },
+    "KeyName": {
+      "Description": "Name of the SSH KeyPair.",
+      "Type": "String",
+      "Default": ""
+    },
+    "EtcdInstanceType": {
+      "Description": "The instance type to use for etcd nodes.",
+      "Type": "String",
+      "Default": "c4.xlarge"
+    },
+    "APIServerInstanceType": {
+      "Description": "The instance type to use for each API node.",
+      "Type": "String",
+      "Default": "m3.xlarge"
+    },
+    "ControllerAddonInstanceType": {
+      "Description": "The instance type to use for the controller-addon node.",
+      "Type": "String",
+      "Default": "m3.xlarge"
+    },
+    "WorkerInstanceType": {
+      "Description": "The instance type to use for worker nodes.",
+      "Type": "String",
+      "Default": "m3.medium"
+    },
+    "APIServerAMI": {
+      "Description": "The AMI to use for API server nodes.",
+      "Type": "String",
+      "Default": ""
+    },
+    "ControllerAddonAMI": {
+      "Description": "The AMI to use for the controller-addon node.",
+      "Type": "String",
+      "Default": ""
+    },
+    "EtcdAMI": {
+      "Description": "The AMI to use for etcd nodes.",
+      "Type": "String",
+      "Default": ""
+    },
+    "WorkerAMI": {
+      "Description": "The AMI to use for worker nodes.",
+      "Type": "String",
+      "Default": ""
+    },
+    "TesterAMI": {
+      "Description": "The AMI to use for worker nodes.",
+      "Type": "String",
+      "Default": ""
+    },
+    "APIServerCount": {
+      "Description": "The number of API server nodes to create per AG.",
+      "Type": "String",
+      "Default": "6"
+    },
+    "WorkerCount": {
+      "Description": "The number of workers to create per AG. Multiply this number by 5 to get total worker count.",
+      "Type": "String",
+      "Default": "200"
+    }
+  },
+  "Outputs": {
+    "TesterPublicIP": {
+      "Description": "Run benchmarks from this host.",
+      "Value": { "Fn::GetAtt": ["TestInstance", "PublicIp"] }
+    },
+    "KubernetesAPIEndpoint": {
+      "Description": "Reach the unprotected but internal Kubernetes API on port 8080 at this cname.",
+      "Value": { "Fn::GetAtt": ["APIServiceELB", "DNSName"] }
+    }
+  },
+  "Mappings": {
+    "Parameters": {
+      "StackCreationTimeout": {
+        "default": "PT240M"
+      }
+    }
+  },
+  "Resources": {
+    "Vpc": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "EnableDnsHostnames": "true",
+        "EnableDnsSupport":   "true",
+        "CidrBlock":          "10.0.0.0/16",
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "VPC"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "InternetGateway": {
+      "Type":      "AWS::EC2::InternetGateway",
+      "DependsOn": "Vpc",
+      "Properties": {
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "IG"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "GatewayToInternet": {
+      "Type":      "AWS::EC2::VPCGatewayAttachment",
+      "DependsOn": "InternetGateway",
+      "Properties": {
+        "VpcId": { "Ref": "Vpc" },
+        "InternetGatewayId": { "Ref": "InternetGateway" }
+      }
+    },
+
+    "NodeSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": { "Ref": "Vpc" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "MapPublicIpOnLaunch": "true",
+        "CidrBlock": "10.0.128.0/17",
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "NodeSubnet"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "PublicSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": { "Ref": "Vpc" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "MapPublicIpOnLaunch": "true",
+        "CidrBlock": "10.0.0.0/17",
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "PublicSubnet"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "PublicRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": { "Ref": "Vpc" },
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "PublicRoutes"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "PublicRoute": {
+      "Type":      "AWS::EC2::Route",
+      "DependsOn": "GatewayToInternet",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0\/0",
+        "GatewayId":    { "Ref": "InternetGateway" },
+        "RouteTableId": { "Ref": "PublicRouteTable" }
+      }
+    },
+
+    "PublicSubnetRouteTableAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId":     { "Ref": "PublicSubnet" },
+        "RouteTableId": { "Ref": "PublicRouteTable" }
+      }
+    },
+    "NodeSubnetRouteTableAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId":     { "Ref": "NodeSubnet" },
+        "RouteTableId": { "Ref": "PublicRouteTable" }
+      }
+    },
+
+    "InfraSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": { "Ref": "AWS::StackName" },
+        "VpcId":            { "Ref": "Vpc" },
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "FromPort": 0,
+            "IpProtocol": "tcp",
+            "ToPort": 65535
+          },
+          {
+            "CidrIp": "0.0.0.0/0",
+            "FromPort": 0,
+            "IpProtocol": "udp",
+            "ToPort": 65535
+          }
+        ],
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "FromPort": 3,
+            "IpProtocol": "icmp",
+            "ToPort": -1
+          },
+          {
+            "CidrIp": "0.0.0.0/0",
+            "FromPort": 22,
+            "IpProtocol": "tcp",
+            "ToPort": 22
+          },
+          {
+            "CidrIp": "10.0.0.0/16",
+            "FromPort": 0,
+            "IpProtocol": "tcp",
+            "ToPort": 65535
+          }
+        ],
+        "Tags": [
+          { "Key": "KubeCluster", "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "benchmark-sg"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+
+    "TestInstanceInterface": {
+      "Type" :     "AWS::EC2::NetworkInterface",
+      "DependsOn": "GatewayToInternet",
+      "Properties" : {
+        "Description" :      "Private IP for the test instance.",
+        "GroupSet" :         [ { "Ref": "InfraSecurityGroup" } ],
+        "PrivateIpAddress" : "10.0.0.40",
+        "SubnetId" :         { "Ref": "PublicSubnet" },
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "tester-interface"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "TestInstance": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn" : ["GatewayToInternet", "APIServiceELB"],
+      "Properties": {
+        "ImageId":          { "Ref": "TesterAMI" },
+        "InstanceType":     "t2.micro",
+        "KeyName":          { "Ref": "KeyName" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "BlockDeviceMappings": [ 
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { 
+              "VolumeSize": "30", 
+              "VolumeType": "gp2" 
+            }
+          } 
+        ],
+        "NetworkInterfaces": [ 
+          { 
+            "NetworkInterfaceId": { "Ref":"TestInstanceInterface" },
+            "DeviceIndex":        "0" 
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "sudo sed -i -e 's/<APISERVERDNS>/",
+                { "Fn::GetAtt" : [ "APIServiceELB" , "DNSName" ] },
+                "/' /home/ubuntu/bench.sh\n",
+                "sudo rm /etc/docker/key.json\n",
+                "sudo systemctl restart docker\n",
+                "sudo mv /home/ubuntu/kubectl /home/ubuntu/bin/\n",
+                "mkdir /home/ubuntu/bench\n",
+                "mv /home/ubuntu/bench.sh /home/ubuntu/bench/bench.sh\n",
+                "mv /home/ubuntu/bench.df /home/ubuntu/bench/bench.df\n",
+                "cp /home/ubuntu/bin/kubectl /home/ubuntu/bench/kubectl\n",
+                "sudo docker -H unix:///var/run/docker.sock build -t local/bench -f bench.df ./bench/\n"
+              ]
+            ]
+          }
+        },
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "tester-tester"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "EtcdDiscoveryInterface": {
+      "Type" :     "AWS::EC2::NetworkInterface",
+      "DependsOn": "GatewayToInternet",
+      "Properties" : {
+        "Description" :      "Private IP for the etcd Discovery node.",
+        "GroupSet" :         [ { "Ref": "InfraSecurityGroup" } ],
+        "PrivateIpAddress" : "10.0.0.10",
+        "SubnetId" :         { "Ref": "PublicSubnet" },
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "etcd-discovery-interface"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "EtcdEventInterface": {
+      "Type" :     "AWS::EC2::NetworkInterface",
+      "DependsOn": "GatewayToInternet",
+      "Properties" : {
+        "Description" :      "Private IP for the etcd Event node.",
+        "GroupSet" :         [ { "Ref": "InfraSecurityGroup" } ],
+        "PrivateIpAddress" : "10.0.0.11",
+        "SubnetId" :         { "Ref": "PublicSubnet" },
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "etcd-event-interface"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "ControllerAddonInterface": {
+      "Type" :     "AWS::EC2::NetworkInterface",
+      "DependsOn": "GatewayToInternet",
+      "Properties" : {
+        "Description" :      "Private IP for the controller-addon.",
+        "GroupSet" :         [ { "Ref": "InfraSecurityGroup" } ],
+        "PrivateIpAddress" : "10.0.0.20",
+        "SubnetId" :         { "Ref": "PublicSubnet" },
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "controller-addon-interface"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "EtcdDiscoveryInstance": {
+      "Type":       "AWS::EC2::Instance",
+      "DependsOn" : ["GatewayToInternet", "EtcdDiscoveryInterface"],
+      "Properties": {
+        "ImageId":          { "Ref": "EtcdAMI" },
+        "InstanceType":     { "Ref": "EtcdInstanceType" },
+        "KeyName":          { "Ref": "KeyName" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "BlockDeviceMappings": [ 
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { 
+              "VolumeSize": "30", 
+              "VolumeType": "gp2" 
+            }
+          } 
+        ],
+        "NetworkInterfaces": [ 
+          { 
+            "NetworkInterfaceId": { "Ref":"EtcdDiscoveryInterface" },
+            "DeviceIndex":        "0" 
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/sh\n",
+                "sudo docker -H unix:///var/run/docker.sock run",
+                " -d --restart always -p 2380:2380 -p 2379:2379",
+                " -v /data",
+                " --name etcd",
+                " quay.io/coreos/etcd:v2.2.1",
+                " -name etcd0",
+                " -data-dir /data",
+                " -advertise-client-urls http://10.0.0.10:2379",
+                " -listen-client-urls http://0.0.0.0:2379",
+                " -initial-advertise-peer-urls http://10.0.0.10:2380",
+                " -listen-peer-urls http://0.0.0.0:2380",
+                " -initial-cluster-token etcd-cluster-1",
+                " -initial-cluster etcd0=http://10.0.0.10:2380",
+                " -initial-cluster-state new\n"
+              ]
+            ]
+          }
+        },
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "etcd-discovery-instance"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "EtcdEventInstance": {
+      "Type":       "AWS::EC2::Instance",
+      "DependsOn" : [ "GatewayToInternet", "EtcdEventInterface" ],
+      "Properties": {
+        "ImageId":          { "Ref": "EtcdAMI" },
+        "InstanceType":     { "Ref": "EtcdInstanceType" },
+        "KeyName":          { "Ref": "KeyName" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "BlockDeviceMappings": [ 
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { 
+              "VolumeSize": "30", 
+              "VolumeType": "gp2" 
+            }
+          }
+        ],
+        "NetworkInterfaces": [ 
+          {
+            "NetworkInterfaceId": { "Ref":"EtcdEventInterface" }, 
+            "DeviceIndex": "0" 
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/sh\n",
+                "sudo docker -H unix:///var/run/docker.sock run",
+                " -d --restart always -p 2380:2380 -p 2379:2379",
+                " -v /data",
+                " --name etcd",
+                " quay.io/coreos/etcd:v2.2.1",
+                " -name etcd0",
+                " -data-dir /data",
+                " -advertise-client-urls http://10.0.0.11:2379",
+                " -listen-client-urls http://0.0.0.0:2379",
+                " -initial-advertise-peer-urls http://10.0.0.11:2380",
+                " -listen-peer-urls http://0.0.0.0:2380",
+                " -initial-cluster-token etcd-cluster-2",
+                " -initial-cluster etcd0=http://10.0.0.11:2380",
+                " -initial-cluster-state new\n"
+              ]
+            ]
+          }
+        },
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "etcd-event-instance"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+
+    "APIServiceELB": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "Subnets":        [ { "Ref":"PublicSubnet" } ],
+        "SecurityGroups": [ { "Ref": "InfraSecurityGroup" } ],
+        "Listeners": [
+          {
+            "LoadBalancerPort": "8080",
+            "InstancePort": "8080",
+            "Protocol": "TCP",
+            "InstanceProtocol" : "TCP"
+          }
+        ],
+        "Scheme": "internal",
+        "Tags": [
+          { "Key": "Name",        "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "api-lb"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "APIServerLC": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "ImageId":        { "Ref": "APIServerAMI" },
+        "InstanceType":   { "Ref": "APIServerInstanceType" },
+        "SecurityGroups": [ { "Ref": "InfraSecurityGroup" } ],
+        "KeyName":        { "Ref": "KeyName" },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { 
+              "VolumeSize": "30",
+              "VolumeType": "gp2"
+            }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "until curl --silent 'http://127.0.0.1:8080/version'; do sleep 5; done\n",
+                "curl --silent -XPOST -d\"$(cat /srv/kubernetes/manifests/kube-system.json)\" \"http://127.0.0.1:8080/api/v1/namespaces\" > /dev/null\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "APIServerASG": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "PublicSubnet" } ],
+        "LoadBalancerNames":       [ { "Ref" : "APIServiceELB" } ],
+        "DesiredCapacity":         { "Ref": "APIServerCount" },
+        "MaxSize":                 { "Ref": "APIServerCount" },
+        "MinSize":                 { "Ref": "APIServerCount" },
+        "LaunchConfigurationName": { "Ref": "APIServerLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "api-server-group"] ] }
+          },
+          { 
+            "Key": "KubeCluster", 
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+
+    "ControllerAddonInstance": {
+      "Type":       "AWS::EC2::Instance",
+      "DependsOn" : ["GatewayToInternet", "ControllerAddonInterface", "APIServiceELB"],
+      "Properties": {
+        "ImageId":          { "Ref": "ControllerAddonAMI" },
+        "InstanceType":     { "Ref": "ControllerAddonInstanceType" },
+        "KeyName":          { "Ref": "KeyName" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { "VolumeSize": "30", "VolumeType": "gp2" }
+          }
+        ],
+        "NetworkInterfaces": [
+          {
+            "NetworkInterfaceId": { "Ref":"ControllerAddonInterface" },
+            "DeviceIndex": "0"
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "sudo sed -i -e 's/<APISERVERDNS>/",
+                { "Fn::GetAtt" : [ "APIServiceELB" , "DNSName" ] },
+                "/' /etc/systemd/system/kubelet.service /srv/kubernetes/manifests/kube-controller-manager.yaml /srv/kubernetes/manifests/kube-scheduler.yaml\n",
+                "sudo systemctl daemon-reload\n",
+                "sudo systemctl enable kubelet\n",
+                "sudo systemctl start kubelet\n"
+              ]
+            ]
+          }
+        },
+        "Tags": [
+          { "Key": "Name", "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "controller-addon-instance"] ] } },
+          { "Key": "KubeCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "WorkerLC": {
+      "Type":       "AWS::AutoScaling::LaunchConfiguration",
+      "DependsOn" : ["APIServiceELB"],
+      "Properties": {
+        "ImageId":        { "Ref": "WorkerAMI" },
+        "InstanceType":   { "Ref": "WorkerInstanceType" },
+        "KeyName":        { "Ref": "KeyName" },
+        "SecurityGroups": [{ "Ref": "InfraSecurityGroup" }],
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { "VolumeSize": "30", "VolumeType": "gp2" }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "sudo sed -i -e 's/<APISERVERDNS>/",
+                { "Fn::GetAtt" : [ "APIServiceELB" , "DNSName" ] },
+                "/' /etc/systemd/system/kubelet.service\n",
+                "sudo systemctl daemon-reload\n",
+                "sudo systemctl enable kubelet\n",
+                "sudo systemctl start kubelet\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "WorkerASG1": {
+      "Type":       "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "APIServerASG", "APIServiceELB"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "WorkerCount" },
+        "MaxSize":                 { "Ref": "WorkerCount" },
+        "MinSize":                 { "Ref": "WorkerCount" },
+        "LaunchConfigurationName": { "Ref": "WorkerLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "worker-g1"] ] }
+          },
+          {
+            "Key": "KubeCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "WorkerASG2": {
+      "Type":       "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "APIServerASG", "APIServiceELB"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "LaunchConfigurationName": { "Ref": "WorkerLC" },
+        "DesiredCapacity":         { "Ref": "WorkerCount" },
+        "MaxSize":                 { "Ref": "WorkerCount" },
+        "MinSize":                 { "Ref": "WorkerCount" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "worker-g2"] ] }
+          },
+          {
+            "Key": "KubeCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "WorkerASG3": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "APIServerASG", "APIServiceELB"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "LaunchConfigurationName": { "Ref": "WorkerLC" },
+        "DesiredCapacity":         { "Ref": "WorkerCount" },
+        "MaxSize":                 { "Ref": "WorkerCount" },
+        "MinSize":                 { "Ref": "WorkerCount" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "worker-g3"] ] }
+          },
+          {
+            "Key": "KubeCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "WorkerASG4": {
+      "Type":       "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "APIServerASG", "APIServiceELB"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "LaunchConfigurationName": { "Ref": "WorkerLC" },
+        "DesiredCapacity":         { "Ref": "WorkerCount" },
+        "MaxSize":                 { "Ref": "WorkerCount" },
+        "MinSize":                 { "Ref": "WorkerCount" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "worker-g4"] ] }
+          },
+          {
+            "Key": "KubeCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "WorkerASG5": {
+      "Type":       "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "APIServerASG", "APIServiceELB"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "LaunchConfigurationName": { "Ref": "WorkerLC" },
+        "DesiredCapacity":         { "Ref": "WorkerCount" },
+        "MaxSize":                 { "Ref": "WorkerCount" },
+        "MinSize":                 { "Ref": "WorkerCount" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "worker-g5"] ] }
+          },
+          {
+            "Key": "KubeCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    }
+  }
+}

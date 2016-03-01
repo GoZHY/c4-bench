@@ -1,0 +1,12 @@
+[Service]
+ExecStartPre=/bin/mkdir -p /etc/kubernetes/manifests
+ExecStart=/bin/kubelet \
+  --api_servers=http://<APISERVERDNS>:8080 \
+  --register-node=false \
+  --allow-privileged=true \
+  --config=/etc/kubernetes/manifests \
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

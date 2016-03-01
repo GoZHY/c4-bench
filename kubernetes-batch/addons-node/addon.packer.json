@@ -1,0 +1,95 @@
+{
+  "variables": {
+    "ami_name": "CustomKubeAddonServer",
+    "description": "Docker, Kublet on Ubuntu.",
+    "client": "Docker",
+    "project": "SwarmBench"
+  },
+  "builders": [
+    {
+      "name": "ec2-us-west-2",
+      "type": "amazon-ebs",
+      "region": "us-west-2",
+      "source_ami": "ami-d95abcb9",
+      "instance_type": "m3.medium",
+      "ssh_username": "ubuntu",
+      "ssh_timeout": "5m",
+      "associate_public_ip_address": true,
+      "ami_virtualization_type": "hvm",
+      "ami_description": "{{user `description`}}",
+      "ami_name": "{{user `ami_name`}} {{isotime | clean_ami_name}}",
+      "tags": {
+        "Name": "{{user `ami_name`}}",
+        "Project": "{{user `project`}}"
+      }
+    }
+  ],
+  "provisioners": [
+    {
+      "type": "file",
+      "source": "./expose.service",
+      "destination": "/tmp/expose.conf"
+    },
+    {
+      "type": "file",
+      "source": "./kubelet",
+      "destination": "/tmp/kubelet"
+    },
+    {
+      "type": "file",
+      "source": "./kube-proxy",
+      "destination": "/tmp/kube-proxy"
+    },
+    {
+      "type": "file",
+      "source": "./kube-controller-manager.yaml",
+      "destination": "/tmp/kube-controller-manager.yaml"
+    },
+    {
+      "type": "file",
+      "source": "./kube-podmaster.yaml",
+      "destination": "/tmp/kube-podmaster.yaml"
+    },
+    {
+      "type": "file",
+      "source": "./kube-scheduler.yaml",
+      "destination": "/tmp/kube-scheduler.yaml"
+    },
+    {
+      "type": "file",
+      "source": "./kubelet.service",
+      "destination": "/tmp/kubelet.service"
+    },
+    {
+      "type": "shell",
+      "start_retry_timeout": "10m",
+      "inline": [
+        "sleep 60",
+        "sudo apt-get install apt-transport-https ca-certificates curl",
+        "sudo apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 58118E89F3A912897C070ADBF76221572C52609D",
+        "sudo /bin/bash -c \"sudo printf 'deb https://apt.dockerproject.org/repo ubuntu-wily main\n' > /etc/apt/sources.list.d/docker.list\"",
+        "sudo apt-get update",
+        "sudo apt-get purge lxc-docker",
+        "sudo apt-cache policy docker-engine",
+        "sudo apt-get upgrade -y",
+        "sudo apt-get install -y linux-image-extra-$(uname -r) docker-engine",
+        "sudo mkdir -p /etc/systemd/system/docker.service.d",
+        "sudo cp /tmp/expose.conf /etc/systemd/system/docker.service.d/expose.conf",
+        "sudo systemctl daemon-reload",
+        "sudo systemctl enable docker",
+        "sudo systemctl restart docker",
+        "sudo docker -H unix:///var/run/docker.sock pull gcr.io/google_containers/hyperkube:v1.2.0-alpha.8",
+        "sudo mkdir -p /etc/kubernetes/manifests",
+        "sudo mkdir -p /srv/kubernetes/manifests",
+        "sudo cp /tmp/kubelet /bin/kubelet",
+        "sudo chmod a+x /bin/kubelet",
+        "sudo cp /tmp/kube-proxy /bin/kube-proxy",
+        "sudo chmod a+x /bin/kube-proxy",
+        "sudo cp /tmp/kubelet.service /etc/systemd/system/kubelet.service",
+        "sudo cp /tmp/kube-podmaster.yaml /etc/kubernetes/manifests/kube-podmaster.yaml",
+        "sudo cp /tmp/kube-controller-manager.yaml /srv/kubernetes/manifests/kube-controller-manager.yaml",
+        "sudo cp /tmp/kube-scheduler.yaml /srv/kubernetes/manifests/kube-scheduler.yaml"
+      ]
+    }
+  ]
+}
