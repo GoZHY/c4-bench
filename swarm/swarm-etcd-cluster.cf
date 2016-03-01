@@ -1,0 +1,678 @@
+{
+  "Description": "Docker Swarm cluster on Etcd. No overlay. Single manager. Single VPC, subnet, availability zone.",
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": {
+    "NamePrefix": {
+      "Description": "Prefix for resource Name tags.",
+      "Type": "String",
+      "Default": "SwarmCluster-"
+    },
+    "AvailabilityZone": {
+      "Description": "The target availability zone.",
+      "Type": "String",
+      "MaxLength": "1",
+      "MinLength": "0",
+      "AllowedPattern": "^[a-z]+$",
+      "Default": "a"
+    },
+    "ClusterName": {
+      "Description": "Name of the Swarm cluster. Value for the SwarmCluster tag.",
+      "Type": "String",
+      "Default": "default"
+    },
+    "KeyName": {
+      "Description": "Name of the SSH KeyPair.",
+      "Type": "String",
+      "Default": ""
+    },
+    "ManagerInstanceType": {
+      "Description": "The instance type to use for the manager node.",
+      "Type": "String",
+      "Default": "m3.xlarge"
+    },
+    "EtcdInstanceType": {
+      "Description": "The instance type to use for the etcd node.",
+      "Type": "String",
+      "Default": "c4.xlarge"
+    },
+    "NodeInstanceType": {
+      "Description": "The instance type to use for the manager node.",
+      "Type": "String",
+      "Default": "m3.medium"
+    },
+    "EtcdAMI": {
+      "Description": "The AMI to use for the etcd instance.",
+      "Type": "String",
+      "Default": ""
+    },
+    "TesterAMI": {
+      "Description": "The AMI to use for the test instance.",
+      "Type": "String",
+      "Default": ""
+    },
+    "NodeAMI": {
+      "Description": "The AMI to use for all nodes.",
+      "Type": "String",
+      "Default": ""
+    },
+    "NodeCount": {
+      "Description": "The number of nodes to create per AG. Multiply this number by 10 to get total node count.",
+      "Type": "String",
+      "Default": "100"
+    }
+
+  },
+  "Outputs": {
+    "TesterPublicIP": {
+      "Description": "Run benchmarks from this host.",
+      "Value": { "Fn::GetAtt": ["TestInstance", "PublicIp"] }
+    }
+  },
+  "Mappings": {
+    "Parameters": {
+      "StackCreationTimeout": {
+        "default": "PT30M"
+      }
+    }
+  },
+  "Resources": {
+    "Vpc": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "EnableDnsHostnames": "true",
+        "EnableDnsSupport":   "true",
+        "CidrBlock":          "10.0.0.0/16",
+        "Tags": [
+          { "Key": "Name",         "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "VPC"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "InternetGateway": {
+      "DependsOn": "Vpc",
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [
+          { "Key": "Name",         "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "IG"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "GatewayToInternet": {
+      "DependsOn": "InternetGateway",
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId":             { "Ref": "Vpc" },
+        "InternetGatewayId": { "Ref": "InternetGateway" }
+      }
+    },
+
+    "NodeSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId":               { "Ref": "Vpc" },
+        "AvailabilityZone":    { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "MapPublicIpOnLaunch": "true",
+        "CidrBlock":           "10.0.128.0/17",
+        "Tags": [
+          { "Key": "Name",         "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "NodeSubnet"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "PublicSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": { "Ref": "Vpc" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "MapPublicIpOnLaunch": "true",
+        "CidrBlock": "10.0.0.0/17",
+        "Tags": [
+          { "Key": "Name",         "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "PublicSubnet"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "PublicRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": { "Ref": "Vpc" },
+        "Tags": [
+          { "Key": "Name",         "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "PublicRoutes"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "PublicRoute": {
+      "DependsOn": "GatewayToInternet",
+      "Type":      "AWS::EC2::Route",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0\/0",
+        "GatewayId":            { "Ref": "InternetGateway" },
+        "RouteTableId":         { "Ref": "PublicRouteTable" }
+      }
+    },
+
+    "PublicSubnetRouteTableAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId":     { "Ref": "PublicSubnet" },
+        "RouteTableId": { "Ref": "PublicRouteTable" }
+      }
+    },
+    "NodeSubnetRouteTableAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId":     { "Ref": "NodeSubnet" },
+        "RouteTableId": { "Ref": "PublicRouteTable" }
+      }
+    },
+
+    "InfraSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": { "Ref": "AWS::StackName" },
+        "VpcId":            { "Ref": "Vpc" },
+        "SecurityGroupEgress": [
+          {
+            "CidrIp":     "0.0.0.0/0",
+            "IpProtocol": "tcp",
+            "FromPort":   0,
+            "ToPort":     65535
+          },
+          {
+            "CidrIp":     "0.0.0.0/0",
+            "IpProtocol": "udp",
+            "FromPort":   0,
+            "ToPort":     65535
+          }
+        ],
+        "SecurityGroupIngress": [
+          {
+            "CidrIp":     "0.0.0.0/0",
+            "IpProtocol": "icmp",
+            "FromPort":   3,
+            "ToPort":     -1
+          },
+          {
+            "CidrIp":     "0.0.0.0/0",
+            "IpProtocol": "tcp",
+            "FromPort":   22,
+            "ToPort":     22
+          },
+          {
+            "CidrIp":     "10.0.0.0/16",
+            "IpProtocol": "tcp",
+            "FromPort":   0,
+            "ToPort":     65535
+          }
+        ],
+        "Tags": [
+          { "Key": "Name",         "Value": { "Fn::Join": [ "-", [ { "Ref":"NamePrefix" }, "sg"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "TestInstanceInterface": {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "DependsOn": "GatewayToInternet",
+      "Properties" : {
+        "Description" :      "Private IP for the test instance.",
+        "PrivateIpAddress" : "10.0.0.40",
+        "GroupSet" :         [ { "Ref": "InfraSecurityGroup" } ],
+        "SubnetId" :         { "Ref": "PublicSubnet" },
+        "Tags": [
+          { "Key": "Name",         "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "tester-interface"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+    "TestInstance": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn" : ["GatewayToInternet", "ManagerInstance"],
+      "Properties": {
+        "ImageId":          { "Ref": "TesterAMI" },
+        "KeyName":          { "Ref": "KeyName" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "InstanceType":     "t2.micro",
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { "VolumeSize": "30", "VolumeType": "gp2" }
+          }
+        ],
+        "NetworkInterfaces": [
+          { "NetworkInterfaceId": { "Ref":"TestInstanceInterface" }, "DeviceIndex": "0" }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/sh\n",
+                "sudo rm /etc/docker/key.json\n",
+                "sudo systemctl restart docker\n",
+                "sudo mkdir /home/ubuntu/bench\n",
+                "sudo cp /home/ubuntu/bench.sh /home/ubuntu/bench/\n",
+                "sudo cp /home/ubuntu/Dockerfile /home/ubuntu/bench/\n",
+                "sudo docker -H unix:///var/run/docker.sock build -t local/bench /home/ubuntu/bench/\n"
+              ]
+            ]
+          }
+        },
+        "Tags": [
+          { "Key": "Name", "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "tester"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "EtcdInterface": {
+      "Type" :     "AWS::EC2::NetworkInterface",
+      "DependsOn": "GatewayToInternet",
+      "Properties" : {
+        "Description" :      "Private IP for the Etcd cluster.",
+        "PrivateIpAddress" : "10.0.0.11",
+        "GroupSet" :         [ { "Ref": "InfraSecurityGroup" } ],
+        "SubnetId" :         { "Ref": "PublicSubnet" },
+        "Tags": [
+          { "Key": "Name", "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "etcd-interface"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "EtcdInstance": {
+      "Type":       "AWS::EC2::Instance",
+      "DependsOn" : ["GatewayToInternet", "EtcdInterface"],
+      "Properties": {
+        "ImageId":          { "Ref": "EtcdAMI" },
+        "InstanceType":     { "Ref": "EtcdInstanceType" },
+        "KeyName":          { "Ref": "KeyName" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { "VolumeSize": "30", "VolumeType": "gp2" }
+          }
+        ],
+        "NetworkInterfaces": [
+          {"NetworkInterfaceId": { "Ref":"EtcdInterface" }, "DeviceIndex": "0" }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/sh\n",
+                "sudo docker -H unix:///var/run/docker.sock run",
+                " -d --restart always -p 2380:2380 -p 2379:2379",
+                " --name etcd",
+                " quay.io/coreos/etcd:v2.2.1",
+                " -name etcd0",
+                " -advertise-client-urls http://10.0.0.11:2379",
+                " -listen-client-urls http://0.0.0.0:2379",
+                " -initial-advertise-peer-urls http://10.0.0.11:2380",
+                " -listen-peer-urls http://0.0.0.0:2380",
+                " -initial-cluster-token etcd-cluster-1",
+                " -initial-cluster etcd0=http://10.0.0.11:2380",
+                " -initial-cluster-state new\n"
+              ]
+            ]
+          }
+        },
+        "Tags": [
+          { "Key": "Name",         "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "etcd"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "ManagerInterface": {
+      "Type" :     "AWS::EC2::NetworkInterface",
+      "DependsOn": "GatewayToInternet",
+      "Properties" : {
+        "Description" :      "Private IP for the Swarm cluster manager.",
+        "PrivateIpAddress" : "10.0.0.20",
+        "GroupSet" :         [ { "Ref": "InfraSecurityGroup" } ],
+        "SubnetId" :         { "Ref": "PublicSubnet" },
+        "Tags": [
+          { "Key": "Name", "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-manager-interface"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "ManagerInstance": {
+      "Type":       "AWS::EC2::Instance",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance", "ManagerInterface"],
+      "Properties": {
+        "ImageId":          { "Ref": "NodeAMI" },
+        "InstanceType":     { "Ref": "ManagerInstanceType" },
+        "KeyName":          { "Ref": "KeyName" },
+        "AvailabilityZone": { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { "VolumeSize": "30", "VolumeType": "gp2" }
+          }
+        ],
+        "NetworkInterfaces": [
+          {"NetworkInterfaceId": { "Ref":"ManagerInterface" }, "DeviceIndex": "0" }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/sh\n",
+                "sudo rm /etc/docker/key.json\n",
+                "sudo systemctl restart docker\n",
+                "while ! nc -w 1 10.0.0.11 2379 ; do sleep 1; echo Waiting for Etcd to become available. ; done \n",
+                "sudo docker -H unix:///var/run/docker.sock run -d --name manager --restart always --net host dockerswarm/swarm:master manage -H  tcp://0.0.0.0:3376 --strategy spread --advertise $(curl http://169.254.169.254/latest/meta-data/local-ipv4):3376 etcd://10.0.0.11:2379\n"
+              ]
+            ]
+          }
+        },
+        "Tags": [
+          { "Key": "Name", "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-manager"] ] } },
+          { "Key": "SwarmCluster", "Value": { "Ref": "ClusterName" } }
+        ]
+      }
+    },
+
+    "NodeLC": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "ImageId":        { "Ref": "NodeAMI" },
+        "InstanceType":   { "Ref": "NodeInstanceType" },
+        "SecurityGroups": [{ "Ref": "InfraSecurityGroup" }],
+        "KeyName":        { "Ref": "KeyName" },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": { "VolumeSize": "30", "VolumeType": "gp2" }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/sh\n",
+                "while ! nc -w 1 10.0.0.11 2379 ; do sleep 1; echo Waiting for Etcd to become available. ; done \n",
+                "sudo rm /etc/docker/key.json\n",
+                "sudo systemctl restart docker\n",
+                "docker run -d --restart always --name swarm-agent dockerswarm/swarm:master join --advertise $(curl http://169.254.169.254/latest/meta-data/local-ipv4):2376 etcd://10.0.0.11:2379\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+
+    "NodeASG1": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g1"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG2": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g2"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG3": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g3"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG4": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g4"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG5": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g5"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG6": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g6"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG7": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g7"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG8": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g8"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG9": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g9"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    },
+    "NodeASG10": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "DependsOn" : ["GatewayToInternet", "EtcdInstance"],
+      "Properties": {
+        "AvailabilityZones":       [ { "Fn::Join": [ "", [ { "Ref": "AWS::Region" }, { "Ref": "AvailabilityZone" } ] ] } ],
+        "VPCZoneIdentifier":       [ { "Ref": "NodeSubnet" } ],
+        "DesiredCapacity":         { "Ref": "NodeCount" },
+        "MaxSize":                 { "Ref": "NodeCount" },
+        "MinSize":                 { "Ref": "NodeCount" },
+        "LaunchConfigurationName": { "Ref": "NodeLC" },
+        "HealthCheckType":         "EC2",
+        "HealthCheckGracePeriod":  600,
+        "Tags": [
+          {
+            "Key": "Name",
+            "PropagateAtLaunch": "true",
+            "Value": { "Fn::Join": [ "-", [{ "Ref":"NamePrefix" }, "swarm-node-g10"] ] }
+          },
+          {
+            "Key": "SwarmCluster",
+            "PropagateAtLaunch": "true",
+            "Value": { "Ref": "ClusterName" }
+          }
+        ]
+      }
+    }
+  }
+}
