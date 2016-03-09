@@ -1,7 +1,16 @@
 # c4-bench: Cloud Container Cluster Common Benchmark
 
+The engineering community at large seems enamored with containers and container platforms like Swarm, Kubernetes, and Mesos. These force multiplying tools are helping the whole community push technological progress faster than ever before.
+
+But there is a difference between having a tool and understanding that tool's strengths and weaknesses relative to the greater ecosystem. It is difficult to improve any tool that you have not measured. Open and repeatable benchmarks, approachable analysis, and clear specific criteria for evaluation will help decision makers do so from an informed and data-driven context.
+
+Please help us further the conversation. We need data on other stacks, cloud providers, and cluster configurations. We need an expanded common benchmark that covers more features. We need a more extendable test harness. We need more people interested in taking the conjecture out of decision making.
+
+Please run these tests yourself and make or suggest improvements. If you're inspired and build something on your own don't hesitate to share it with the world. We need the data.
 
 ## Building Clusters
+
+See the README in the target platform directory assembly instructions.
 
 ## Running the Benchmark
 
@@ -44,3 +53,20 @@ I add timestamps with the `-t` flag so I can get an idea how quickly progress is
 * Optional secondary etcd instance is always at 10.0.0.11
 * Nodes are always started in the 10.0.128.0/17 subnet (10.0.0.0/17 conflicts with some LXC config that conflicts with machines at 10.0.3.0/24)
 * Kube API servers are always to be accessed by the ELB DNS name
+
+
+## Copyright Notice
+
+Copyright &copy; 2016 Jeff Nickoloff - All in Geek Consulting Services, LLC
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
